@@ -4,6 +4,8 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import { Sidebar } from "@/components/sidebar";
+import { Topbar } from "@/components/topbar";
 
 export default function DashboardLayout({
   children,
@@ -25,5 +27,17 @@ export default function DashboardLayout({
     );
   }
 
-  return <>{children}</>;
+  return (
+    <div className="min-h-screen flex">
+      <div className="hidden lg:block w-64 shrink-0 border-r">
+        <div className="sticky top-0 h-screen">
+          <Sidebar />
+        </div>
+      </div>
+      <div className="flex-1 min-w-0 flex flex-col">
+        <Topbar />
+        <main className="flex-1 overflow-x-hidden">{children}</main>
+      </div>
+    </div>
+  );
 }

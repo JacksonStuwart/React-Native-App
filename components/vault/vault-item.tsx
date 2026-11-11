@@ -61,8 +61,7 @@ export function VaultItem({ entry }: { entry: DecryptedVaultEntry }) {
   }
 
   const initials = entry.name.slice(0, 2).toUpperCase();
-  const isCorrupt =
-    !entry.username && !entry.password && !entry.notes && entry.name;
+  const isCorrupt = !entry.username && !entry.password && !entry.notes;
 
   return (
     <>
@@ -74,6 +73,11 @@ export function VaultItem({ entry }: { entry: DecryptedVaultEntry }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <div className="font-medium truncate">{entry.name}</div>
+              {entry.legacy && (
+                <Badge variant="secondary" className="text-[10px] h-4">
+                  old app
+                </Badge>
+              )}
               {entry.tags.map((t) => (
                 <Badge key={t} variant="outline" className="text-[10px] h-4">
                   {t}
@@ -84,6 +88,7 @@ export function VaultItem({ entry }: { entry: DecryptedVaultEntry }) {
               {isCorrupt ? "Can't decrypt with this key" : entry.username}
             </div>
           </div>
+          {!entry.legacy && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -114,6 +119,7 @@ export function VaultItem({ entry }: { entry: DecryptedVaultEntry }) {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          )}
         </div>
 
         {!isCorrupt && (

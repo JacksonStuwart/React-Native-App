@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, ShieldCheck, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/card";
 import { useAuth } from "@/hooks/use-auth";
 import { useMasterKey } from "@/hooks/use-master-key";
-import { verifyMasterKey } from "@/hooks/use-vault";
+import { vaultHasExistingKey, verifyMasterKey } from "@/hooks/use-vault";
 
 export function MasterKeyPrompt() {
   const { user } = useAuth();
@@ -26,19 +26,21 @@ export function MasterKeyPrompt() {
   const [submitting, setSubmitting] = useState(false);
   const [needsConfirm, setNeedsConfirm] = useState<"none" | "checking" | "new">("checking");
 
-  useState(() => {
-    (async () => {
-      if (!user) return;
-      const { getDoc, doc } = await import("firebase/firestore");
-      const { db } = await import("@/lib/firebase");
-      const snap = await getDoc(doc(db, "users", user.uid, "vaultMeta", "verifier"));
-      setNeedsConfirm(snap.exists() ? "none" : "new");
-    })();
-  });
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    vaultHasExistingKey(user.uid).then((exists) => {
+      if (!cancelled) setNeedsConfirm(exists ? "none" : "new");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   async function submit() {
     if (!user) return;
-    if (value.length < 8) {
+    if (needsConfirm === "checking") return;
+    if (needsConfirm === "new" && value.length < 8) {
       toast.error("Use at least 8 characters for your master key");
       return;
     }
@@ -119,7 +121,11 @@ export function MasterKeyPrompt() {
               </span>
             </div>
           )}
-          <Button onClick={submit} className="w-full" disabled={submitting}>
+          <Button
+            onClick={submit}
+            className="w-full"
+            disabled={submitting || needsConfirm === "checking" || !value}
+          >
             {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
             {isNew ? "Initialize vault" : "Unlock"}
           </Button>

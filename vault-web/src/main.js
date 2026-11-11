@@ -1,8 +1,5 @@
 "use strict";
 (() => {
-const API_KEY = "AIzaSyCt1NyQFEJkrIC3td6Tt0Kbn5KY6h1OMjU"; // public project identifier, not a secret
-const DB = "https://homeallowance-ff1fa-default-rtdb.firebaseio.com";
-const AUTH = "https://identitytoolkit.googleapis.com/v1/accounts:";
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const CLIP_CLEAR_MS = 30 * 1000;
 
@@ -45,7 +42,7 @@ const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 async function decrypt(b64, pass) {
   try {
     if (typeof b64 !== "string" || !b64) return "";
-    const raw = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    const raw = Uint8Array.from(atob(b64.trim()), (ch) => ch.charCodeAt(0));
     if (raw.length < 32 || String.fromCharCode(...raw.subarray(0, 8)) !== "Salted__") return "";
     const salt = raw.subarray(8, 16), ct = raw.subarray(16), pw = enc.encode(pass);
     let derived = new Uint8Array(0), block = new Uint8Array(0);
@@ -54,40 +51,28 @@ async function decrypt(b64, pass) {
     const plain = await crypto.subtle.decrypt({ name: "AES-CBC", iv: derived.subarray(32, 48) }, key, ct);
     return strictUtf8.decode(plain);
   } catch {
-    return ""; // wrong key -> bad padding or invalid UTF-8
+    return ""; // wrong key -> bad padding or invalid UTF-8; or not valid ciphertext
   }
 }
 
-// ---- Firebase REST (token kept in memory only; reload = sign in again) ----
-let session = null; // { uid, idToken, expiresAt }
-async function authCall(method, body) {
-  const res = await fetch(`${AUTH}${method}?key=${API_KEY}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data.error && data.error.message) || `HTTP ${res.status}`);
-  return data;
-}
-async function dbGet(path) {
-  if (!session || Date.now() > session.expiresAt) throw new Error("SESSION_EXPIRED");
-  const res = await fetch(`${DB}/${path}.json?auth=${encodeURIComponent(session.idToken)}`);
-  if (res.status === 401) throw new Error("PERMISSION_DENIED");
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-function friendly(err) {
-  const m = String((err && err.message) || err);
-  if (/INVALID_LOGIN_CREDENTIALS|INVALID_PASSWORD|INVALID_CREDENTIAL/.test(m)) return "Wrong email or password.";
-  if (/EMAIL_NOT_FOUND/.test(m)) return "No account with that email.";
-  if (/INVALID_EMAIL/.test(m)) return "That email doesn't look right.";
-  if (/TOO_MANY_ATTEMPTS/.test(m)) return "Too many attempts. Wait a bit and try again.";
-  if (/USER_DISABLED/.test(m)) return "This account has been disabled.";
-  if (/SESSION_EXPIRED/.test(m)) return "Your session expired. Please sign in again.";
-  if (/PERMISSION_DENIED/.test(m)) return "The database refused access for this account.";
-  if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return "Network error. Check your connection.";
-  return m;
+// ---- find { name: { userId, password } } records anywhere in a JSON export ----
+// Accepts a full Realtime Database export, a single user node, the "keys" node itself,
+// or a plain { "Site": { "userId": "...", "password": "..." } } object.
+function findEntries(data) {
+  const found = [];
+  const seen = new Set();
+  (function walk(node, depth) {
+    if (!node || typeof node !== "object" || depth > 8) return;
+    for (const [name, val] of Object.entries(node)) {
+      if (val && typeof val === "object" && (typeof val.password === "string" || typeof val.userId === "string")) {
+        const id = name + "\u0000" + val.userId + "\u0000" + val.password;
+        if (!seen.has(id)) { seen.add(id); found.push({ name, userId: val.userId || "", password: val.password || "" }); }
+      } else {
+        walk(val, depth + 1);
+      }
+    }
+  })(data, 0);
+  return found;
 }
 
 // ---- DOM helpers (data is only ever inserted as text, never as HTML) ----
@@ -110,6 +95,7 @@ const PATHS = {
   check: ["M5 12l5 5L20 7"],
   lock: ["M5 11h14v10H5z", "M8 11V7a4 4 0 0 1 8 0v4"],
   search: ["M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z", "M21 21l-5-5"],
+  file: ["M14 3H6v18h12V7z", "M14 3v4h4"],
 };
 function icon(name) {
   const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
@@ -132,86 +118,87 @@ function toast(msg, kind) {
   setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 2800);
 }
 const brand = () => h("div", { class: "brand" }, h("div", { class: "logo" }, icon("shield")), h("span", null, "Vault"));
-const foot = () => h("p", { class: "foot" }, "Decrypted only in this tab · auto-locks after 5 minutes idle");
-const shell = (...kids) => h("main", { class: "shell" }, brand(), ...kids, foot());
+const foot = () => h("p", { class: "foot" }, "Works offline · decrypted only in this tab · auto-locks after 5 minutes idle");
 
-// ---- state (memory only) ----
-let cipher = null, entries = null, displayName = "", idleTimer = null;
+// ---- state (memory only; nothing is ever saved) ----
+let cipherEntries = null; // [{ name, userId, password }] still encrypted
+let sourceLabel = "";
+let entries = null; // decrypted
+let idleTimer = null;
 
-function signInView(notice) {
-  const email = h("input", { type: "email", id: "email", autocomplete: "username", required: true, placeholder: "you@example.com", "data-autofocus": true });
-  const pass = h("input", { type: "password", id: "password", autocomplete: "current-password", required: true, placeholder: "Your account password" });
+// Optional: paste a JSON export between the tags of <script type="application/json" id="vault-data">
+// in this file to skip choosing a file each time.
+try {
+  const embedded = document.getElementById("vault-data");
+  const parsed = embedded && embedded.textContent.trim() ? JSON.parse(embedded.textContent) : null;
+  const list = parsed ? findEntries(parsed) : [];
+  if (list.length) { cipherEntries = list; sourceLabel = "built into this page"; }
+} catch { /* ignore a malformed embedded block; the file picker still works */ }
+
+function unlockView(notice) {
+  const key = h("input", { type: "password", id: "mkey", autocomplete: "off", spellcheck: "false", placeholder: "Master key", "data-autofocus": true });
   const err = h("p", { class: "error", role: "alert" }, notice || "");
-  const btn = h("button", { type: "submit", class: "primary" }, "Sign in");
-  async function submit(e) {
-    e.preventDefault();
+  const btn = h("button", { type: "submit", class: "primary" }, "Unlock");
+  const fileInput = h("input", { type: "file", id: "vfile", accept: ".json,application/json", class: "visually-hidden" });
+  const fileName = h("span", { class: "file-name" }, cipherEntries ? `${cipherEntries.length} saved entries · ${sourceLabel}` : "No file chosen");
+  const drop = h("label", { for: "vfile", class: `drop${cipherEntries ? " ready" : ""}` },
+    icon("file"),
+    h("span", { class: "drop-text" },
+      h("strong", null, cipherEntries ? "Vault file loaded" : "Choose your vault file"),
+      fileName));
+
+  async function loadFile(file) {
     err.textContent = "";
-    btn.disabled = true; btn.textContent = "Signing in…";
     try {
-      const r = await authCall("signInWithPassword", { email: email.value.trim(), password: pass.value, returnSecureToken: true });
-      pass.value = "";
-      session = { uid: r.localId, idToken: r.idToken, expiresAt: Date.now() + (Number(r.expiresIn) || 3600) * 1000 - 60000 };
-      render(unlockView());
-      dbGet(`Users/${encodeURIComponent(session.uid)}/UserName`).then((n) => {
-        if (typeof n === "string" && n.trim() && !entries) { displayName = n.trim(); render(unlockView()); }
-      }).catch(() => {});
-    } catch (e2) {
-      err.textContent = friendly(e2);
-      btn.disabled = false; btn.textContent = "Sign in";
+      if (file.size > 5 * 1024 * 1024) throw new Error("That file is too large to be a vault export.");
+      const list = findEntries(JSON.parse(await file.text()));
+      if (!list.length) throw new Error("No saved passwords found in that file.");
+      cipherEntries = list;
+      sourceLabel = file.name;
+      fileName.textContent = `${list.length} saved entries · ${file.name}`;
+      drop.querySelector("strong").textContent = "Vault file loaded";
+      drop.classList.add("ready");
+      key.focus();
+    } catch (e) {
+      err.textContent = e instanceof SyntaxError ? "That file isn't valid JSON." : e.message;
     }
   }
-  async function forgot() {
-    err.textContent = "";
-    if (!email.value.trim()) { err.textContent = "Type your email first, then click “Forgot password?”."; email.focus(); return; }
-    try { await authCall("sendOobCode", { requestType: "PASSWORD_RESET", email: email.value.trim() }); toast("Password reset email sent.", "ok"); }
-    catch (e2) { err.textContent = friendly(e2); }
-  }
-  return shell(h("form", { class: "card", onsubmit: submit },
-    h("h1", null, "Sign in"),
-    h("p", { class: "muted" }, "Use the account from your Home Allowance app."),
-    h("label", { for: "email" }, "Email"), email,
-    h("label", { for: "password" }, "Password"), pass,
-    err, btn,
-    h("button", { type: "button", class: "link", onclick: forgot }, "Forgot password?")));
-}
+  fileInput.addEventListener("change", () => fileInput.files[0] && loadFile(fileInput.files[0]));
+  for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });
+  for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); });
+  drop.addEventListener("drop", (e) => e.dataTransfer.files[0] && loadFile(e.dataTransfer.files[0]));
 
-function unlockView() {
-  const key = h("input", { type: "password", id: "mkey", autocomplete: "off", spellcheck: "false", placeholder: "Master key", "data-autofocus": true });
-  const err = h("p", { class: "error", role: "alert" });
-  const btn = h("button", { type: "submit", class: "primary" }, "Unlock");
   async function submit(e) {
     e.preventDefault();
-    if (!key.value) return;
     err.textContent = "";
+    if (!cipherEntries) { err.textContent = "Choose your vault file first."; return; }
+    if (!key.value) { key.focus(); return; }
     btn.disabled = true; btn.textContent = "Unlocking…";
     try {
-      if (!cipher) cipher = (await dbGet(`Users/${encodeURIComponent(session.uid)}/keys`)) || {};
-      const names = Object.keys(cipher).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-      if (!names.length) { err.textContent = "No saved passwords were found for this account."; return; }
-      const out = await Promise.all(names.map(async (name) => {
-        const rec = cipher[name] || {};
-        const userId = await decrypt(rec.userId, key.value);
-        const password = await decrypt(rec.password, key.value);
-        return { name, userId, password, ok: !!(userId || password) };
+      const out = await Promise.all(cipherEntries.map(async (c) => {
+        const userId = await decrypt(c.userId, key.value);
+        const password = await decrypt(c.password, key.value);
+        return { name: c.name, userId, password, ok: !!(userId || password) };
       }));
+      out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
       if (!out.some((x) => x.ok)) { err.textContent = "Wrong master key — nothing could be decrypted."; key.select(); return; }
       key.value = "";
       entries = out;
       armIdle();
       render(vaultView());
-    } catch (e2) {
-      if (/SESSION_EXPIRED/.test(String(e2.message))) { signOutNow(friendly(e2)); return; }
-      err.textContent = "Couldn't load your passwords: " + friendly(e2);
     } finally {
       btn.disabled = false; btn.textContent = "Unlock";
     }
   }
-  return shell(h("form", { class: "card", onsubmit: submit },
-    h("h1", null, displayName ? `Hi, ${displayName}` : "Unlock vault"),
-    h("p", { class: "muted" }, "Enter the master key you used on the app's “Get Keys” screen. It never leaves this browser."),
-    h("label", { for: "mkey" }, "Master key"), key,
-    err, btn,
-    h("button", { type: "button", class: "link", onclick: () => signOutNow() }, "Sign out")));
+
+  return h("main", { class: "shell" }, brand(),
+    h("form", { class: "card", onsubmit: submit },
+      h("h1", null, "Unlock vault"),
+      h("p", { class: "muted" }, "Enter your master key to decrypt your saved passwords. Nothing leaves this page."),
+      cipherEntries && sourceLabel === "built into this page" ? null : [fileInput, drop],
+      h("label", { for: "mkey" }, "Master key"), key,
+      err, btn),
+    foot());
 }
 
 function copyBtn(value, label) {
@@ -233,7 +220,7 @@ function entryCard(e) {
   if (!e.ok) {
     return h("article", { class: "entry dim", "data-q": e.name.toLowerCase() }, avatar,
       h("div", { class: "body" }, h("div", { class: "name" }, e.name),
-        h("p", { class: "muted small" }, "Saved with a different key — can't decrypt with this one.")));
+        h("p", { class: "muted small" }, "Can't decrypt this one with this key.")));
   }
   let shown = false;
   const MASK = "••••••••••";
@@ -250,7 +237,7 @@ function entryCard(e) {
     h("div", { class: "body" },
       h("div", { class: "name" }, e.name),
       h("div", { class: "row" }, h("span", { class: "label" }, "User ID"), h("span", { class: "mono" }, e.userId || "—"), e.userId ? copyBtn(e.userId, "User ID") : null),
-      h("div", { class: "row" }, h("span", { class: "label" }, "Password"), pw, eye, copyBtn(e.password, "Password"))));
+      h("div", { class: "row" }, h("span", { class: "label" }, "Password"), pw, eye, e.password ? copyBtn(e.password, "Password") : null)));
 }
 
 function vaultView() {
@@ -266,29 +253,23 @@ function vaultView() {
   });
   return h("main", { class: "shell wide" },
     h("header", { class: "topbar" }, brand(),
-      h("div", { class: "actions" },
-        h("button", { type: "button", class: "ghost", onclick: lock }, icon("lock"), "Lock"),
-        h("button", { type: "button", class: "ghost", onclick: () => signOutNow() }, "Sign out"))),
+      h("button", { type: "button", class: "ghost", onclick: lock }, icon("lock"), "Lock")),
     h("div", { class: "summary" }, h("h1", null, "Saved passwords"), h("span", { class: "pill" }, `${okCount} of ${entries.length} unlocked`)),
     h("div", { class: "search-wrap" }, icon("search"), search),
     list, none, foot());
 }
 
-function lock() {
+function lock(notice) {
   entries = null;
   clearTimeout(idleTimer);
-  render(session ? unlockView() : signInView());
-}
-function signOutNow(notice) {
-  session = null; cipher = null; entries = null; displayName = "";
-  clearTimeout(idleTimer);
-  render(signInView(notice));
+  render(unlockView(typeof notice === "string" ? notice : ""));
 }
 function armIdle() {
   clearTimeout(idleTimer);
-  if (entries) idleTimer = setTimeout(() => { lock(); toast("Locked after inactivity"); }, IDLE_LOCK_MS);
+  if (entries) idleTimer = setTimeout(() => lock("Locked after 5 minutes of inactivity."), IDLE_LOCK_MS);
 }
 for (const ev of ["pointerdown", "keydown", "scroll", "touchstart"]) addEventListener(ev, armIdle, { passive: true });
+document.addEventListener("visibilitychange", () => { if (document.hidden && entries) { idleTimer && clearTimeout(idleTimer); idleTimer = setTimeout(() => lock("Locked while the tab was hidden."), 60 * 1000); } });
 
-render(signInView());
+render(unlockView());
 })();

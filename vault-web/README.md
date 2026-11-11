@@ -1,16 +1,35 @@
-# Vault (read-only viewer for the old app's passwords)
+# Vault — offline password viewer
 
-A single static page (`index.html`) that signs in to the `homeallowance-ff1fa`
-Firebase project, reads `Users/{uid}/keys` from the Realtime Database, and
-decrypts each entry **in the browser** with the master key you type. No
-libraries, no third-party scripts; decryption uses WebCrypto in a format
-compatible with the CryptoJS AES ciphertext the React Native app wrote.
+A single HTML file (`index.html`) that decrypts the passwords the old Home
+Allowance app saved, using only your **master key**. No login, no server, no
+internet: it works opened straight from your computer.
 
-- Nothing is stored: the login token, master key and decrypted values live in
-  memory only. Reloading the tab signs you out; it auto-locks after 5 minutes idle.
-- `vercel.json` sets a strict Content-Security-Policy that only allows this
-  page's own script (pinned by SHA-256) and only talks to Firebase Auth and the
-  project's Realtime Database.
+## Use it
 
-Open `index.html` directly, or deploy this folder to any static host.
-After editing `src/`, run `node build.mjs` to regenerate `index.html` and the CSP hash.
+1. **Get your vault file once.** In the Firebase Console, open
+   *Realtime Database → Data*, click the **⋮** menu, then **Export JSON**.
+   (Exporting the whole database is fine; the page finds the saved passwords
+   inside it and ignores everything else.)
+2. Open `index.html` in Chrome, choose the exported `.json` file, enter your
+   master key, then click **Unlock**.
+
+**Optional, master key only:** paste the exported JSON between
+`<script type="application/json" id="vault-data">` and `</script>` in
+`index.html`. The file picker disappears and the page asks only for the key.
+Keep that copy private: it holds your encrypted passwords, which could be
+brute-forced offline if the master key is weak.
+
+## Security
+
+- Decryption happens in the browser (WebCrypto), compatible with the CryptoJS
+  AES ciphertext the app wrote. Verified against CryptoJS output.
+- A Content-Security-Policy allows only this page's own script (pinned by
+  SHA-256) and blocks **all** network connections.
+- The key and decrypted passwords live in memory only. Nothing is saved.
+  Locks after 5 minutes idle (or 1 minute in a background tab); copied values
+  are cleared from the clipboard after 30 seconds.
+
+## Editing
+
+Change `src/main.js` or `src/template.html`, then run `node build.mjs` to
+regenerate `index.html` and its CSP hash.

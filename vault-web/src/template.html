@@ -6,6 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="/*CSP*/">
 <title>Vault</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z' fill='%235c5c8a'/%3E%3C/svg%3E">
 <style>
@@ -71,12 +72,22 @@ button:disabled{opacity:.6;cursor:default}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 .toast.bad{background:var(--danger);color:#fff}
 [hidden]{display:none!important}
+.visually-hidden{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.drop{display:flex;align-items:center;gap:12px;border:1.5px dashed var(--border);border-radius:11px;padding:14px;margin:4px 0 6px;cursor:pointer;transition:border-color .15s,background .15s;font-weight:400}
+.drop:hover,.drop.over,.visually-hidden:focus-visible+.drop{border-color:var(--brand);background:var(--brand-soft)}
+.drop.ready{border-style:solid;border-color:color-mix(in srgb,var(--ok) 55%,var(--border))}
+.drop>.icon{width:22px;height:22px;color:var(--brand)}
+.drop-text{display:flex;flex-direction:column;min-width:0}
+.drop-text strong{font-size:14px}
+.file-name{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 @media (max-width:520px){.label{width:58px}.shell{padding-top:28px}}
 </style>
 </head>
 <body>
 <div id="app"><main class="shell"><p class="muted center">Loading…</p></main></div>
 <noscript><p style="text-align:center">This page needs JavaScript.</p></noscript>
+<!-- Optional: paste your vault JSON export between these two tags to skip choosing a file. -->
+<script type="application/json" id="vault-data"></script>
 <script>/*BUNDLE*/</script>
 </body>
 </html>

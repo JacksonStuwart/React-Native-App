@@ -1,5 +1,5 @@
-// Inlines src/main.js into a single index.html and writes vercel.json with a
-// CSP that only allows that exact inline script (by SHA-256 hash).
+// Inlines src/main.js into a single offline index.html with a CSP that only
+// allows that exact inline script (by SHA-256 hash) and blocks all network access.
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -11,34 +11,18 @@ const html = readFileSync(join(here, "src/template.html"), "utf8").replace("/*BU
 const inline = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const hash = createHash("sha256").update(inline, "utf8").digest("base64");
 
+// Meta CSP: only this page's own script may run, and it may not contact any server.
 const csp = [
   "default-src 'none'",
   `script-src 'sha256-${hash}'`,
   "style-src 'unsafe-inline'",
   "img-src data:",
-  "connect-src https://identitytoolkit.googleapis.com https://homeallowance-ff1fa-default-rtdb.firebaseio.com",
+  "connect-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
-  "frame-ancestors 'none'",
 ].join("; ");
+const out = html.replace("/*CSP*/", csp);
 
-const vercel = {
-  headers: [{
-    source: "/(.*)",
-    headers: [
-      { key: "Content-Security-Policy", value: csp },
-      { key: "X-Frame-Options", value: "DENY" },
-      { key: "X-Content-Type-Options", value: "nosniff" },
-      { key: "Referrer-Policy", value: "no-referrer" },
-      { key: "X-Robots-Tag", value: "noindex, nofollow" },
-      { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
-      { key: "Cache-Control", value: "no-store" },
-    ],
-  }],
-};
-
-writeFileSync(join(here, "index.html"), html);
-writeFileSync(join(here, "vercel.json"), JSON.stringify(vercel, null, 2) + "\n");
+writeFileSync(join(here, "index.html"), out);
 const sha1 = (s) => createHash("sha1").update(s, "utf8").digest("hex");
-console.log(`index.html ${(Buffer.byteLength(html) / 1024).toFixed(1)} KB sha1=${sha1(html)}`);
-console.log(`vercel.json sha1=${sha1(JSON.stringify(vercel, null, 2) + "\n")}`);
+console.log(`index.html ${(Buffer.byteLength(out) / 1024).toFixed(1)} KB sha1=${sha1(out)}`);
